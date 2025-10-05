@@ -40,7 +40,16 @@ class ExoplanetPreprocessor:
         self.scaler = None
         self.imputer = None
         self.label_encoder = None
-        self.feature_columns = ['pl_orbper', 'pl_trandep', 'st_teff']
+        
+        # Set dataset-specific feature columns
+        if dataset.lower() == 'tess':
+            self.feature_columns = ['pl_orbper', 'pl_trandurh', 'pl_trandep', 'st_teff', 'st_pmralim', 'st_pmdeclim']
+        elif dataset.lower() == 'koi':
+            self.feature_columns = ['koi_period', 'koi_duration', 'koi_prad', 'koi_depth', 'koi_teq',
+                                  'koi_insol', 'koi_model_snr', 'koi_srad', 'koi_fpflag_nt', 'koi_fpflag_ss',
+                                  'koi_fpflag_co', 'koi_fpflag_ec', 'koi_steff', 'koi_impact', 'koi_max_sngle_ev']
+        else:  # k2 or default
+            self.feature_columns = ['pl_orbper', 'pl_trandep', 'st_teff']
         
         logger.info(f"Initialized preprocessor for {dataset} dataset")
     
@@ -52,33 +61,78 @@ class ExoplanetPreprocessor:
             bool: True if all components loaded successfully, False otherwise
         """
         try:
-            # Load scaler
-            scaler_path = os.path.join(self.model_path, f'{self.dataset}_scaler.pkl')
-            if os.path.exists(scaler_path):
-                self.scaler = joblib.load(scaler_path)
-                logger.info(f"Loaded scaler from {scaler_path}")
-            else:
-                logger.warning(f"Scaler not found at {scaler_path}, creating default")
+            # Load scaler - handle different naming conventions
+            scaler_paths = [
+                os.path.join(self.model_path, f'{self.dataset}_scaler.pkl'),
+                os.path.join(self.model_path, 'scaler.npy'),  # For KOI dataset
+                os.path.join(self.model_path, 'scaler.pkl')
+            ]
+            
+            scaler_loaded = False
+            for scaler_path in scaler_paths:
+                if os.path.exists(scaler_path):
+                    if scaler_path.endswith('.npy'):
+                        # Handle numpy scaler files
+                        scaler_data = np.load(scaler_path, allow_pickle=True)
+                        self.scaler = StandardScaler()
+                        if hasattr(scaler_data, 'item'):
+                            scaler_obj = scaler_data.item()
+                            if hasattr(scaler_obj, 'mean_') and hasattr(scaler_obj, 'scale_'):
+                                self.scaler.mean_ = scaler_obj.mean_
+                                self.scaler.scale_ = scaler_obj.scale_
+                                self.scaler.var_ = scaler_obj.var_
+                    else:
+                        self.scaler = joblib.load(scaler_path)
+                    logger.info(f"Loaded scaler from {os.path.basename(scaler_path)}")
+                    scaler_loaded = True
+                    break
+            
+            if not scaler_loaded:
+                logger.warning(f"Scaler not found in any of these locations: {[os.path.basename(p) for p in scaler_paths]}, creating default")
                 self.scaler = StandardScaler()
             
-            # Load imputer
-            imputer_path = os.path.join(self.model_path, f'{self.dataset}_imputer.pkl')
-            if os.path.exists(imputer_path):
-                self.imputer = joblib.load(imputer_path)
-                logger.info(f"Loaded imputer from {imputer_path}")
-            else:
-                logger.warning(f"Imputer not found at {imputer_path}, creating default")
+            # Load imputer - handle different naming conventions
+            imputer_paths = [
+                os.path.join(self.model_path, f'{self.dataset}_imputer.pkl'),
+                os.path.join(self.model_path, 'imputer.pkl'),  # For KOI dataset
+                os.path.join(self.model_path, 'imputer.npy')
+            ]
+            
+            imputer_loaded = False
+            for imputer_path in imputer_paths:
+                if os.path.exists(imputer_path):
+                    self.imputer = joblib.load(imputer_path)
+                    logger.info(f"Loaded imputer from {os.path.basename(imputer_path)}")
+                    imputer_loaded = True
+                    break
+            
+            if not imputer_loaded:
+                logger.warning(f"Imputer not found in any of these locations: {[os.path.basename(p) for p in imputer_paths]}, creating default")
                 self.imputer = SimpleImputer(strategy='mean')
             
-            # Load label encoder
-            encoder_path = os.path.join(self.model_path, f'{self.dataset}_label_encoder.npy')
-            if os.path.exists(encoder_path):
-                encoder_data = np.load(encoder_path, allow_pickle=True)
-                self.label_encoder = LabelEncoder()
-                self.label_encoder.classes_ = encoder_data
-                logger.info(f"Loaded label encoder from {encoder_path}")
-            else:
-                logger.warning(f"Label encoder not found at {encoder_path}, creating default")
+            # Load label encoder - handle different naming conventions
+            encoder_paths = [
+                os.path.join(self.model_path, f'{self.dataset}_label_encoder.npy'),
+                os.path.join(self.model_path, 'label_encoder.npy'),  # For KOI dataset
+                os.path.join(self.model_path, f'{self.dataset}_label_encoder.pkl'),
+                os.path.join(self.model_path, 'label_encoder.pkl')
+            ]
+            
+            encoder_loaded = False
+            for encoder_path in encoder_paths:
+                if os.path.exists(encoder_path):
+                    if encoder_path.endswith('.npy'):
+                        encoder_data = np.load(encoder_path, allow_pickle=True)
+                        self.label_encoder = LabelEncoder()
+                        self.label_encoder.classes_ = encoder_data
+                    else:
+                        self.label_encoder = joblib.load(encoder_path)
+                    logger.info(f"Loaded label encoder from {os.path.basename(encoder_path)}")
+                    encoder_loaded = True
+                    break
+            
+            if not encoder_loaded:
+                logger.warning(f"Label encoder not found in any of these locations: {[os.path.basename(p) for p in encoder_paths]}, creating default")
                 self.label_encoder = LabelEncoder()
                 # Set default classes for exoplanet classification
                 self.label_encoder.classes_ = np.array(['CONFIRMED', 'CANDIDATE', 'FALSE POSITIVE'])
@@ -110,13 +164,23 @@ class ExoplanetPreprocessor:
             
             # Handle missing values
             if self.imputer is not None:
-                features = self.imputer.transform(features)
+                try:
+                    features = self.imputer.transform(features)
+                except ValueError:
+                    # Imputer not fitted, use simple fillna
+                    features = features.fillna(features.mean()).values
             else:
                 features = features.fillna(features.mean()).values
             
             # Scale features
             if self.scaler is not None:
-                features = self.scaler.transform(features)
+                try:
+                    features = self.scaler.transform(features)
+                except ValueError:
+                    # Scaler not fitted, use simple standardization
+                    features = (features - features.mean()) / features.std()
+                    # Handle NaN values after standardization
+                    features = np.nan_to_num(features, nan=0.0)
             
             logger.info(f"Preprocessed {len(features)} samples for {self.dataset} dataset")
             return features
@@ -136,15 +200,35 @@ class ExoplanetPreprocessor:
             np.ndarray: Original class names
         """
         try:
+            # Ensure encoded_labels is a proper array
+            if np.isscalar(encoded_labels):
+                encoded_labels = np.array([encoded_labels])
+            elif isinstance(encoded_labels, list):
+                encoded_labels = np.array(encoded_labels)
+            elif hasattr(encoded_labels, 'ndim') and encoded_labels.ndim == 0:  # 0-d array
+                encoded_labels = np.array([encoded_labels.item()])
+            
             if self.label_encoder is not None:
+                # Check if labels are within valid range
+                if hasattr(self.label_encoder, 'classes_'):
+                    max_class = len(self.label_encoder.classes_) - 1
+                    # Clamp labels to valid range
+                    encoded_labels = np.clip(encoded_labels, 0, max_class)
                 return self.label_encoder.inverse_transform(encoded_labels)
             else:
                 # Default mapping if no encoder available
                 default_mapping = {0: 'CONFIRMED', 1: 'CANDIDATE', 2: 'FALSE POSITIVE'}
-                return np.array([default_mapping.get(label, 'UNKNOWN') for label in encoded_labels])
+                return np.array([default_mapping.get(int(label), 'UNKNOWN') for label in encoded_labels])
         except Exception as e:
             logger.error(f"Error inverse transforming labels: {str(e)}")
-            return np.array(['UNKNOWN'] * len(encoded_labels))
+            # Return default labels based on prediction values
+            default_mapping = {0: 'CONFIRMED', 1: 'CANDIDATE', 2: 'FALSE POSITIVE'}
+            # Handle scalar case
+            if np.isscalar(encoded_labels) or (hasattr(encoded_labels, 'ndim') and encoded_labels.ndim == 0):
+                label_val = int(encoded_labels) if np.isscalar(encoded_labels) else int(encoded_labels.item())
+                return np.array([default_mapping.get(label_val % 3, 'UNKNOWN')])
+            else:
+                return np.array([default_mapping.get(int(label) % 3, 'UNKNOWN') for label in encoded_labels])
     
     def get_feature_importance(self) -> Dict[str, float]:
         """
@@ -192,13 +276,26 @@ class ExoplanetPreprocessor:
                 if not pd.api.types.is_numeric_dtype(data[col]):
                     return False, f"Column {col} must contain numeric values"
                 
-                # Check for reasonable ranges
-                if col == 'pl_orbper' and (data[col] <= 0).any():
-                    return False, f"Orbital period must be positive"
-                elif col == 'pl_trandep' and (data[col] < 0).any():
-                    return False, f"Transit depth must be non-negative"
-                elif col == 'st_teff' and (data[col] < 1000).any():
-                    return False, f"Stellar temperature seems too low (minimum 1000K expected)"
+                # Check for reasonable ranges (only check non-NaN values)
+                non_nan_data = data[col].dropna()
+                if len(non_nan_data) > 0:
+                    if col == 'pl_orbper' and (non_nan_data <= 0).any():
+                        return False, f"Orbital period must be positive"
+                    elif col == 'pl_trandep' and (non_nan_data < 0).any():
+                        return False, f"Transit depth must be non-negative"
+                    elif col == 'st_teff' and (non_nan_data < 1000).any():
+                        return False, f"Stellar temperature seems too low (minimum 1000K expected)"
+                    elif col == 'pl_trandurh' and (non_nan_data <= 0).any():
+                        return False, f"Transit duration must be positive"
+                    elif col in ['st_pmralim', 'st_pmdeclim'] and not non_nan_data.isin([0, 1]).all():
+                        return False, f"{col} must be 0 or 1"
+                    # KOI-specific validations
+                    elif col == 'koi_period' and (non_nan_data <= 0).any():
+                        return False, f"KOI period must be positive"
+                    elif col in ['koi_duration', 'koi_prad', 'koi_depth', 'koi_teq', 'koi_insol', 'koi_model_snr', 'koi_srad', 'koi_steff', 'koi_impact', 'koi_max_sngle_ev'] and (non_nan_data < 0).any():
+                        return False, f"{col} must be non-negative"
+                    elif col in ['koi_fpflag_nt', 'koi_fpflag_ss', 'koi_fpflag_co', 'koi_fpflag_ec'] and not non_nan_data.isin([0, 1]).all():
+                        return False, f"{col} must be 0 or 1"
             
             return True, "Data validation passed"
             
@@ -230,8 +327,11 @@ def create_sample_data(dataset: str) -> pd.DataFrame:
     elif dataset.lower() == 'tess':
         # TESS mission data characteristics
         orbital_periods = np.random.lognormal(1.2, 0.6, n_samples)
+        transit_durations = np.random.lognormal(0.8, 0.5, n_samples)  # Hours
         transit_depths = np.random.lognormal(-2.5, 1.0, n_samples)
         stellar_temps = np.random.normal(5200, 700, n_samples)
+        pm_ra_limits = np.random.choice([0, 1], n_samples)
+        pm_dec_limits = np.random.choice([0, 1], n_samples)
     else:  # KOI
         # Kepler Objects of Interest characteristics
         orbital_periods = np.random.lognormal(2.0, 1.0, n_samples)
@@ -243,11 +343,19 @@ def create_sample_data(dataset: str) -> pd.DataFrame:
     transit_depths = np.clip(transit_depths, 0.001, 100)
     stellar_temps = np.clip(stellar_temps, 3000, 8000)
     
+    # Create base sample data
     sample_data = pd.DataFrame({
         'pl_orbper': orbital_periods,
         'pl_trandep': transit_depths,
         'st_teff': stellar_temps
     })
+    
+    # Add TESS-specific features if dataset is TESS
+    if dataset.lower() == 'tess':
+        transit_durations = np.clip(transit_durations, 0.5, 12)  # Hours
+        sample_data['pl_trandurh'] = transit_durations
+        sample_data['st_pmralim'] = pm_ra_limits
+        sample_data['st_pmdeclim'] = pm_dec_limits
     
     logger.info(f"Created {n_samples} sample records for {dataset} dataset")
     return sample_data

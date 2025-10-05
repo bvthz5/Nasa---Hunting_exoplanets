@@ -86,6 +86,19 @@ document.addEventListener('DOMContentLoaded', function() {
     initializeApp();
 });
 
+// Global error handler for unhandled promise rejections and async errors
+window.addEventListener('unhandledrejection', function(event) {
+    console.warn('Unhandled promise rejection:', event.reason);
+    // Prevent the default browser behavior of logging to console
+    event.preventDefault();
+});
+
+// Global error handler for general errors
+window.addEventListener('error', function(event) {
+    console.warn('Global error caught:', event.error);
+    // Don't prevent default for general errors, just log them
+});
+
 /**
  * Initialize all application components
  */
@@ -94,6 +107,17 @@ function initializeApp() {
     initializeSliders();
     initializeFileUpload();
     initializeAccessibility();
+    
+    // Initialize current dataset from the selector
+    if (elements.datasetSelect) {
+        currentDataset = elements.datasetSelect.value;
+        console.log('Initial dataset set to:', currentDataset);
+        // Show/hide TESS fields based on initial dataset
+        handleDatasetChange();
+    } else {
+        console.error('Dataset selector not found!');
+    }
+    
     loadStatistics();
     updateDatasetSelector();
     
@@ -263,6 +287,33 @@ function handleFile(file) {
 function handleDatasetChange() {
     currentDataset = elements.datasetSelect.value;
     loadStatistics();
+    
+    // Show/hide TESS-specific fields
+    const tessFields = document.getElementById('tess-fields');
+    if (tessFields) {
+        if (currentDataset === 'tess') {
+            tessFields.style.display = 'grid';
+            // Make TESS fields required
+            document.getElementById('pl_trandurh').required = true;
+            document.getElementById('st_pmralim').required = true;
+            document.getElementById('st_pmdeclim').required = true;
+        } else {
+            tessFields.style.display = 'none';
+            // Make TESS fields not required
+            document.getElementById('pl_trandurh').required = false;
+            document.getElementById('st_pmralim').required = false;
+            document.getElementById('st_pmdeclim').required = false;
+        }
+    }
+    
+    // Update template download link
+    const templateLink = document.getElementById('template-download-link');
+    const templateText = document.getElementById('template-download-text');
+    if (templateLink && templateText) {
+        templateLink.href = `/download-template?dataset=${currentDataset}`;
+        templateText.textContent = `Download ${currentDataset.toUpperCase()} Template`;
+    }
+    
     showToast(`Switched to ${currentDataset.toUpperCase()} dataset`, 'info');
 }
 
@@ -287,7 +338,17 @@ async function handleManualPrediction(event) {
     if (isLoading) return;
     
     // Validate all inputs
-    const inputs = [elements.plOrbper, elements.plTrandep, elements.stTeff];
+    let inputs = [elements.plOrbper, elements.plTrandep, elements.stTeff];
+    
+    // Add TESS fields if dataset is TESS
+    if (currentDataset === 'tess') {
+        inputs.push(
+            document.getElementById('pl_trandurh'),
+            document.getElementById('st_pmralim'),
+            document.getElementById('st_pmdeclim')
+        );
+    }
+    
     let isValid = true;
     
     inputs.forEach(input => {
@@ -301,13 +362,34 @@ async function handleManualPrediction(event) {
         return;
     }
     
-    // Collect form data
+    // Collect form data based on dataset
     const data = {
-        pl_orbper: parseFloat(elements.plOrbper.value),
-        pl_trandep: parseFloat(elements.plTrandep.value),
-        st_teff: parseFloat(elements.stTeff.value),
         dataset: currentDataset
     };
+    
+    // Add common features
+    data.pl_orbper = parseFloat(elements.plOrbper.value);
+    data.pl_trandep = parseFloat(elements.plTrandep.value);
+    data.st_teff = parseFloat(elements.stTeff.value);
+    
+    // Add TESS-specific features if dataset is TESS
+    if (currentDataset === 'tess') {
+        const pl_trandurh = document.getElementById('pl_trandurh');
+        const st_pmralim = document.getElementById('st_pmralim');
+        const st_pmdeclim = document.getElementById('st_pmdeclim');
+        
+        if (pl_trandurh && st_pmralim && st_pmdeclim) {
+            data.pl_trandurh = parseFloat(pl_trandurh.value) || 2.5; // Default transit duration
+            data.st_pmralim = parseInt(st_pmralim.value) || 0; // Default to 0
+            data.st_pmdeclim = parseInt(st_pmdeclim.value) || 0; // Default to 0
+        } else {
+            console.error('TESS fields not found in DOM');
+            showToast('TESS fields not found. Please refresh the page.', 'error');
+            return;
+        }
+    }
+    
+    console.log('Sending data for', currentDataset, ':', data);
     
     try {
         showLoading(true);
@@ -324,7 +406,16 @@ async function handleManualPrediction(event) {
         const result = await response.json();
         
         if (!response.ok) {
-            throw new Error(result.error || 'Prediction failed');
+            // Provide more detailed error message for different error types
+            let errorMessage = result.error || 'Prediction failed';
+            if (errorMessage.includes('Feature shape mismatch') || errorMessage.includes('Model expects different features')) {
+                errorMessage += '\n\nTip: The model was trained with different features. Try retraining the model or use a different dataset.';
+            } else if (errorMessage.includes('Prediction failed')) {
+                errorMessage += '\n\nTip: There was an issue with the model prediction. Try retraining the model or check your input data.';
+            } else if (errorMessage.includes('Data preprocessing failed')) {
+                errorMessage += '\n\nTip: Check that your input values are valid numbers within reasonable ranges.';
+            }
+            throw new Error(errorMessage);
         }
         
         displayManualResults(result);
@@ -376,6 +467,27 @@ async function handleFileUpload(event) {
         return;
     }
     
+    // Debug logging
+    console.log('Upload attempt:', {
+        fileName: file.name,
+        fileSize: file.size,
+        fileType: file.type,
+        dataset: currentDataset,
+        retrain: elements.retrainCheckbox.checked
+    });
+    
+    // Validate dataset
+    if (!SUPPORTED_DATASETS.includes(currentDataset)) {
+        showToast(`Invalid dataset: ${currentDataset}. Please select a valid dataset.`, 'error');
+        return;
+    }
+    
+    // Validate file type
+    if (!file.name.toLowerCase().endsWith('.csv')) {
+        showToast('Please select a CSV file', 'error');
+        return;
+    }
+    
     const formData = new FormData();
     formData.append('file', file);
     formData.append('dataset', currentDataset);
@@ -390,10 +502,47 @@ async function handleFileUpload(event) {
             body: formData
         });
         
+        console.log('Upload response:', {
+            status: response.status,
+            statusText: response.statusText,
+            headers: Object.fromEntries(response.headers.entries())
+        });
+        
         const result = await response.json();
         
         if (!response.ok) {
-            throw new Error(result.error || 'Upload failed');
+            console.error('Upload failed:', result);
+            // Provide more detailed error message for different error types
+            let errorMessage = result.error || 'Upload failed';
+            if (errorMessage.includes('Missing required columns') || (errorMessage.includes('Raw') && errorMessage.includes('dataset detected'))) {
+                // Handle multi-line error messages with better formatting
+                // Try both escaped and unescaped newlines
+                let errorLines = errorMessage.split('\\n\\n');
+                if (errorLines.length === 1) {
+                    errorLines = errorMessage.split('\n\n');
+                }
+                
+                if (errorLines.length > 1) {
+                    // Show each part of the error message separately
+                    errorLines.forEach((line, index) => {
+                        if (line.trim()) {
+                            const toastType = index === 0 ? 'error' : 'info';
+                            showToast(line.trim(), toastType);
+                        }
+                    });
+                    return; // Don't show the original error message
+                }
+                errorMessage += '\n\nTip: Download the CSV template to see the correct format.';
+            } else if (errorMessage.includes('Data preprocessing failed')) {
+                errorMessage += '\n\nTip: Ensure your CSV contains valid numeric data with positive orbital periods and reasonable stellar temperatures.';
+            } else if (errorMessage.includes('must be positive') || errorMessage.includes('must be non-negative')) {
+                errorMessage += '\n\nTip: Check that your data contains valid values - orbital periods must be positive, transit depths must be non-negative.';
+            } else if (errorMessage.includes('Feature shape mismatch') || errorMessage.includes('Model expects different features')) {
+                errorMessage += '\n\nTip: The model was trained with different features. Try retraining the model or use a different dataset.';
+            } else if (errorMessage.includes('Prediction failed')) {
+                errorMessage += '\n\nTip: There was an issue with the model prediction. Try retraining the model or check your input data.';
+            }
+            throw new Error(errorMessage);
         }
         
         if (elements.retrainCheckbox.checked) {

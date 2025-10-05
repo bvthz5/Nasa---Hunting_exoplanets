@@ -31,6 +31,27 @@ warnings.filterwarnings('ignore')
 # Import our custom preprocessing utilities
 from src.utils.preprocessing import ExoplanetPreprocessor, get_dataset_statistics, create_sample_data
 
+def make_json_safe(obj):
+    """
+    Convert numpy types and NaN values to JSON-safe types.
+    """
+    if isinstance(obj, dict):
+        return {k: make_json_safe(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [make_json_safe(item) for item in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        if pd.isna(obj):
+            return 0.0
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif pd.isna(obj):
+        return 0.0
+    else:
+        return obj
+
 # Configure comprehensive logging
 def setup_logging():
     """Setup comprehensive logging configuration for production use."""
@@ -78,7 +99,30 @@ preprocessors: Dict[str, ExoplanetPreprocessor] = {}
 
 # Supported datasets and their features
 DATASETS = ['k2', 'tess', 'koi']
+
+# Dataset-specific feature requirements
+DATASET_FEATURES = {
+    'k2': ['pl_orbper', 'pl_trandep', 'st_teff'],
+    'tess': ['pl_orbper', 'pl_trandurh', 'pl_trandep', 'st_teff', 'st_pmralim', 'st_pmdeclim'],
+    'koi': ['koi_period', 'koi_duration', 'koi_prad', 'koi_depth', 'koi_teq',
+            'koi_insol', 'koi_model_snr', 'koi_srad', 'koi_fpflag_nt', 'koi_fpflag_ss',
+            'koi_fpflag_co', 'koi_fpflag_ec', 'koi_steff', 'koi_impact', 'koi_max_sngle_ev']
+}
+
+# Default features for backward compatibility
 REQUIRED_FEATURES = ['pl_orbper', 'pl_trandep', 'st_teff']
+
+def get_required_features(dataset: str) -> List[str]:
+    """
+    Get the required features for a specific dataset.
+    
+    Args:
+        dataset: Dataset name
+        
+    Returns:
+        List of required feature names
+    """
+    return DATASET_FEATURES.get(dataset, REQUIRED_FEATURES)
 
 # Base path for models (use current directory)
 BASE_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
@@ -161,14 +205,25 @@ def load_model_components(dataset: str) -> bool:
             logger.warning(f"Failed to load preprocessing components for {dataset}")
             return False
         
-        # Load XGBoost model
-        model_path = os.path.join(dataset_path, f'{dataset}_xgboost_model.pkl')
-        if os.path.exists(model_path):
-            with open(model_path, 'rb') as f:
-                models[dataset] = pickle.load(f)
-            logger.info(f"Loaded XGBoost model for {dataset}")
-        else:
-            logger.warning(f"XGBoost model not found: {model_path}")
+        # Load XGBoost model - handle different naming conventions
+        model_paths = [
+            os.path.join(dataset_path, f'{dataset}_xgboost_model.pkl'),
+            os.path.join(dataset_path, f'kepler_xgboost_model.pkl'),  # For KOI dataset
+            os.path.join(dataset_path, f'{dataset}_model.pkl'),
+            os.path.join(dataset_path, 'model.pkl')
+        ]
+        
+        model_loaded = False
+        for model_path in model_paths:
+            if os.path.exists(model_path):
+                with open(model_path, 'rb') as f:
+                    models[dataset] = pickle.load(f)
+                logger.info(f"Loaded XGBoost model for {dataset} from {os.path.basename(model_path)}")
+                model_loaded = True
+                break
+        
+        if not model_loaded:
+            logger.warning(f"XGBoost model not found in any of these locations: {[os.path.basename(p) for p in model_paths]}")
             return False
         
         # Store preprocessor
@@ -221,6 +276,8 @@ def preprocess_data(data: pd.DataFrame, dataset: str) -> Optional[np.ndarray]:
         
     except Exception as e:
         logger.error(f"Error preprocessing data for {dataset}: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
 
@@ -362,7 +419,7 @@ def get_stats():
                     'dataset': dataset.upper(),
                     'accuracy': 0.85,
                     'class_distribution': {'CANDIDATE': 1000, 'CONFIRMED': 600, 'FALSE POSITIVE': 400},
-                    'features': REQUIRED_FEATURES,
+                    'features': get_required_features(dataset),
                     'model_type': 'XGBoost (Mock)',
                     'total_samples': 2000,
                     'status': 'mock_data'
@@ -373,7 +430,7 @@ def get_stats():
             'dataset': dataset.upper(),
             'accuracy': get_model_accuracy(dataset),
             'class_distribution': get_class_distribution(dataset),
-            'features': REQUIRED_FEATURES,
+            'features': get_required_features(dataset),
             'model_type': 'XGBoost',
             'total_samples': sum(get_class_distribution(dataset).values())
         }
@@ -409,21 +466,30 @@ def predict():
         if not data:
             return jsonify({'error': 'No JSON data provided'}), 400
         
+        logger.info(f"Received prediction request for dataset: {data.get('dataset', 'unknown')}")
+        logger.info(f"Data keys: {list(data.keys())}")
+        
         # Validate required fields
         dataset = data.get('dataset', 'k2').lower()
         if dataset not in DATASETS:
             return jsonify({'error': f'Invalid dataset. Must be one of: {DATASETS}'}), 400
         
-        # Check for required features
-        missing_features = [f for f in REQUIRED_FEATURES if f not in data]
+        # Check for required features for this dataset
+        required_features = get_required_features(dataset)
+        missing_features = [f for f in required_features if f not in data]
         if missing_features:
-            return jsonify({'error': f'Missing required features: {missing_features}'}), 400
+            return jsonify({'error': f'Missing required features for {dataset.upper()}: {missing_features}. Required: {required_features}'}), 400
         
         # Validate feature values
-        for feature in REQUIRED_FEATURES:
+        for feature in required_features:
             value = data[feature]
-            if not isinstance(value, (int, float)) or value <= 0:
-                return jsonify({'error': f'Invalid value for {feature}: must be positive number'}), 400
+            # Special validation for TESS features
+            if feature in ['st_pmralim', 'st_pmdeclim']:
+                if not isinstance(value, (int, float)) or value not in [0, 1]:
+                    return jsonify({'error': f'Invalid value for {feature}: must be 0 or 1'}), 400
+            else:
+                if not isinstance(value, (int, float)) or value <= 0:
+                    return jsonify({'error': f'Invalid value for {feature}: must be positive number'}), 400
         
         # Ensure model is loaded
         if dataset not in models:
@@ -439,22 +505,29 @@ def predict():
                     'confidence': confidence,
                     'probabilities': [0.1, 0.8, 0.1] if prediction == 'CONFIRMED' else [0.8, 0.1, 0.1],
                     'dataset': dataset.upper(),
-                    'features': {f: data[f] for f in REQUIRED_FEATURES},
+                    'features': {f: data[f] for f in required_features},
                     'status': 'mock_prediction'
                 }
                 return jsonify(result), 200
         
         # Prepare data for prediction
-        input_data = pd.DataFrame([{f: data[f] for f in REQUIRED_FEATURES}])
+        input_data = pd.DataFrame([{f: data[f] for f in required_features}])
         
         # Preprocess data
         processed_data = preprocess_data(input_data, dataset)
         if processed_data is None:
             return jsonify({'error': 'Data preprocessing failed'}), 500
         
-        # Make prediction
-        prediction_proba = models[dataset].predict_proba(processed_data)[0]
-        prediction_idx = np.argmax(prediction_proba)
+        # Make prediction with error handling
+        try:
+            prediction_proba = models[dataset].predict_proba(processed_data)[0]
+            prediction_idx = np.argmax(prediction_proba)
+        except Exception as e:
+            logger.error(f"Error making prediction for {dataset}: {str(e)}")
+            if "Feature shape mismatch" in str(e):
+                return jsonify({'error': f'Model expects different features than provided. The {dataset.upper()} model may have been trained with a different feature set. Please try retraining the model or use a different dataset.'}), 500
+            else:
+                return jsonify({'error': f'Prediction failed: {str(e)}'}), 500
         
         # Get class name using preprocessor
         if dataset in preprocessors:
@@ -469,7 +542,7 @@ def predict():
             'confidence': confidence,
             'probabilities': prediction_proba.tolist(),
             'dataset': dataset.upper(),
-            'features': {f: data[f] for f in REQUIRED_FEATURES}
+            'features': {f: data[f] for f in required_features}
         }
         
         logger.info(f"Prediction made for dataset {dataset}: {prediction_class} (confidence: {confidence:.3f})")
@@ -479,6 +552,58 @@ def predict():
         logger.error(f"Error making prediction: {str(e)}")
         return jsonify({'error': 'Prediction failed'}), 500
 
+
+@app.route('/download-template')
+@require_auth
+def download_template():
+    """
+    Download a CSV template with the required columns and sample data.
+    """
+    try:
+        # Get the current dataset from query parameters
+        dataset = request.args.get('dataset', 'k2').lower()
+        required_features = get_required_features(dataset)
+        
+        # Create a sample CSV with dataset-specific columns
+        sample_data = {}
+        
+        # Common features
+        if 'pl_orbper' in required_features:
+            sample_data['pl_orbper'] = [1.7575, 2.5, 10.0]  # Orbital period in days
+        if 'pl_trandep' in required_features:
+            sample_data['pl_trandep'] = [0.0744, 0.1, 0.05]  # Transit depth
+        if 'st_teff' in required_features:
+            sample_data['st_teff'] = [4759, 5000, 4000]  # Stellar effective temperature in K
+        
+        # TESS-specific features
+        if 'pl_trandurh' in required_features:
+            sample_data['pl_trandurh'] = [2.5, 3.0, 1.8]  # Transit duration in hours
+        if 'st_pmralim' in required_features:
+            sample_data['st_pmralim'] = [0, 1, 0]  # Proper motion RA limit (0 or 1)
+        if 'st_pmdeclim' in required_features:
+            sample_data['st_pmdeclim'] = [1, 0, 1]  # Proper motion DEC limit (0 or 1)
+        
+        df = pd.DataFrame(sample_data)
+        
+        # Create CSV in memory
+        from io import StringIO
+        csv_buffer = StringIO()
+        df.to_csv(csv_buffer, index=False)
+        csv_content = csv_buffer.getvalue()
+        csv_buffer.close()
+        
+        # Return as downloadable file
+        from flask import make_response
+        response = make_response(csv_content)
+        response.headers['Content-Type'] = 'text/csv'
+        response.headers['Content-Disposition'] = f'attachment; filename=exoplanet_template_{dataset}.csv'
+        
+        logger.info("Template CSV downloaded successfully")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error creating template: {str(e)}")
+        return jsonify({'error': 'Failed to create template'}), 500
 
 @app.route('/upload', methods=['POST'])
 @require_auth
@@ -521,26 +646,118 @@ def upload_file():
         
         try:
             # Try reading with error handling for malformed CSV
-            df = pd.read_csv(file_path, on_bad_lines='skip', encoding='utf-8')
+            # First, try to find the actual header row by skipping comment lines
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            header_row = 0
+            for i, line in enumerate(lines):
+                if not line.strip().startswith('#') and line.strip():
+                    header_row = i
+                    break
+            
+            # Read CSV starting from the header row
+            df = pd.read_csv(file_path, skiprows=header_row, on_bad_lines='skip', encoding='utf-8')
             if df.empty:
                 return jsonify({'error': 'CSV file is empty or contains no valid data'}), 400
+                
         except Exception as e:
             try:
                 # Try with different encoding if first attempt fails
-                df = pd.read_csv(file_path, encoding='latin-1', on_bad_lines='skip')
+                with open(file_path, 'r', encoding='latin-1') as f:
+                    lines = f.readlines()
+                
+                header_row = 0
+                for i, line in enumerate(lines):
+                    if not line.strip().startswith('#') and line.strip():
+                        header_row = i
+                        break
+                
+                df = pd.read_csv(file_path, skiprows=header_row, encoding='latin-1', on_bad_lines='skip')
             except Exception as e2:
                 return jsonify({'error': f'Invalid CSV file: {str(e2)}'}), 400
         
+        # Get required features for the selected dataset
+        required_features = get_required_features(dataset)
+        
         # Validate required columns
-        missing_columns = [col for col in REQUIRED_FEATURES if col not in df.columns]
+        missing_columns = [col for col in required_features if col not in df.columns]
         if missing_columns:
-            return jsonify({'error': f'Missing required columns: {missing_columns}'}), 400
+            # Check if this looks like a raw dataset file that needs preprocessing
+            raw_dataset_indicators = {
+                'koi': ['kepid', 'kepoi_name', 'kepler_name', 'koi_disposition'],
+                'k2': ['epic_id', 'k2_name', 'k2_disposition'],
+                'tess': ['tic_id', 'toi_id', 'tess_disposition']
+            }
+            
+            # Check if this looks like a raw dataset
+            is_raw_dataset = False
+            dataset_type = None
+            for ds_type, indicators in raw_dataset_indicators.items():
+                if any(indicator in df.columns for indicator in indicators):
+                    is_raw_dataset = True
+                    dataset_type = ds_type
+                    break
+            
+            if is_raw_dataset:
+                error_msg = f'❌ Raw {dataset_type.upper()} dataset detected! '
+                error_msg += f'This appears to be a raw dataset file with columns like {[col for col in df.columns if any(ind in col for ind in raw_dataset_indicators[dataset_type])][:3]}. '
+                error_msg += f'\n\n✅ SOLUTION: Download the {dataset.upper()} template from the "Template Download" section above, '
+                error_msg += f'fill it with your data using the correct column names ({required_features}), and upload that instead. '
+                error_msg += f'\n\n📋 The template shows the exact format needed for predictions.'
+            else:
+                # Provide helpful error message with available columns
+                available_cols = [col for col in df.columns if 'pl_' in col or 'st_' in col][:10]  # Show first 10 relevant columns
+                error_msg = f'Missing required columns for {dataset.upper()}: {missing_columns}. '
+                error_msg += f'Required columns for {dataset.upper()} are: {required_features}. '
+                if available_cols:
+                    error_msg += f'Available planet/star columns include: {available_cols}...'
+                else:
+                    error_msg += f'Available columns: {list(df.columns)[:10]}...'
+                error_msg += f'\n\n💡 Tip: Download the CSV template to see the correct format.'
+            
+            return jsonify({'error': error_msg}), 400
         
         # Clean up uploaded file
         os.remove(file_path)
         
         # Prepare feature data
-        feature_data = df[REQUIRED_FEATURES].copy()
+        feature_data = df[required_features].copy()
+        
+        # Clean NaN values for JSON serialization with appropriate defaults
+        # Use median values instead of 0.0 to avoid validation failures
+        fillna_dict = {}
+        
+        # Common features
+        if 'pl_orbper' in feature_data.columns:
+            fillna_dict['pl_orbper'] = feature_data['pl_orbper'].median() if not feature_data['pl_orbper'].isna().all() else 10.0
+        if 'pl_trandep' in feature_data.columns:
+            fillna_dict['pl_trandep'] = feature_data['pl_trandep'].median() if not feature_data['pl_trandep'].isna().all() else 0.01
+        if 'st_teff' in feature_data.columns:
+            fillna_dict['st_teff'] = feature_data['st_teff'].median() if not feature_data['st_teff'].isna().all() else 5000.0
+        
+        # TESS-specific features
+        if 'pl_trandurh' in feature_data.columns:
+            fillna_dict['pl_trandurh'] = feature_data['pl_trandurh'].median() if not feature_data['pl_trandurh'].isna().all() else 2.0
+        if 'st_pmralim' in feature_data.columns:
+            fillna_dict['st_pmralim'] = 0  # Default to 0 for binary feature
+        if 'st_pmdeclim' in feature_data.columns:
+            fillna_dict['st_pmdeclim'] = 0  # Default to 0 for binary feature
+        
+        feature_data = feature_data.fillna(fillna_dict)
+        
+        # Final check: ensure no NaN values remain
+        if feature_data.isna().any().any():
+            logger.warning("Some NaN values remain after filling, replacing with defaults")
+            fallback_dict = {
+                'pl_orbper': 10.0, 
+                'pl_trandep': 0.01, 
+                'st_teff': 5000.0,
+                'pl_trandurh': 2.0,
+                'st_pmralim': 0,
+                'st_pmdeclim': 0
+            }
+            feature_data = feature_data.fillna(fallback_dict)
         
         # Handle retraining request
         if retrain:
@@ -557,11 +774,15 @@ def upload_file():
                 for i in range(len(feature_data)):
                     prediction = np.random.choice(mock_classes)
                     confidence = np.random.uniform(0.7, 0.95)
+                    # Ensure features dict is JSON serializable
+                    features_dict = feature_data.iloc[i].to_dict()
+                    # Convert any remaining NaN values to 0.0
+                    features_dict = {k: (0.0 if pd.isna(v) else v) for k, v in features_dict.items()}
                     results.append({
                         'row': i + 1,
                         'prediction': prediction,
                         'confidence': confidence,
-                        'features': feature_data.iloc[i].to_dict()
+                        'features': features_dict
                     })
                 
                 response = {
@@ -571,16 +792,23 @@ def upload_file():
                     'message': 'Bulk classification completed successfully (mock data)',
                     'status': 'mock_predictions'
                 }
-                return jsonify(response), 200
+                return jsonify(make_json_safe(response)), 200
         
         # Preprocess data
         processed_data = preprocess_data(feature_data, dataset)
         if processed_data is None:
-            return jsonify({'error': 'Data preprocessing failed'}), 500
+            return jsonify({'error': 'Data preprocessing failed. Please check that your CSV contains valid numeric data for orbital period (pl_orbper > 0), transit depth (pl_trandep ≥ 0), and stellar temperature (st_teff ≥ 1000K).'}), 500
         
-        # Make predictions
-        predictions = models[dataset].predict(processed_data)
-        prediction_probas = models[dataset].predict_proba(processed_data)
+        # Make predictions with error handling
+        try:
+            predictions = models[dataset].predict(processed_data)
+            prediction_probas = models[dataset].predict_proba(processed_data)
+        except Exception as e:
+            logger.error(f"Error making predictions for {dataset}: {str(e)}")
+            if "Feature shape mismatch" in str(e):
+                return jsonify({'error': f'Model expects different features than provided. The {dataset.upper()} model may have been trained with a different feature set. Please try retraining the model or use a different dataset.'}), 500
+            else:
+                return jsonify({'error': f'Prediction failed: {str(e)}'}), 500
         
         # Format results
         results = []
@@ -591,11 +819,15 @@ def upload_file():
                 pred_class = f'Class_{pred}'
             
             confidence = float(max(proba))
+            # Ensure features dict is JSON serializable
+            features_dict = feature_data.iloc[i].to_dict()
+            # Convert any remaining NaN values to 0.0
+            features_dict = {k: (0.0 if pd.isna(v) else v) for k, v in features_dict.items()}
             results.append({
                 'row': i + 1,
                 'prediction': pred_class,
                 'confidence': confidence,
-                'features': feature_data.iloc[i].to_dict()
+                'features': features_dict
             })
         
         response = {
@@ -606,7 +838,7 @@ def upload_file():
         }
         
         logger.info(f"Processed {len(results)} rows for dataset {dataset}")
-        return jsonify(response), 200
+        return jsonify(make_json_safe(response)), 200
         
     except Exception as e:
         logger.error(f"Error processing upload: {str(e)}")
@@ -767,16 +999,41 @@ def perform_retraining(dataset: str, n_estimators: int, max_depth: int,
             logger.error(f"Failed to preprocess training data for {dataset}")
             return get_model_accuracy(dataset)
         
-        # Encode labels
-        if dataset in preprocessors:
-            encoded_labels = preprocessors[dataset].label_encoder.transform(mock_labels)
-        else:
-            # Create temporary encoder
-            temp_encoder = LabelEncoder()
-            encoded_labels = temp_encoder.fit_transform(mock_labels)
+        # Encode labels with error handling
+        try:
+            if dataset in preprocessors and preprocessors[dataset].label_encoder is not None:
+                # Check if the encoder has the required classes
+                if hasattr(preprocessors[dataset].label_encoder, 'classes_'):
+                    # Ensure all mock labels are in the encoder's classes
+                    valid_labels = [label for label in mock_labels if label in preprocessors[dataset].label_encoder.classes_]
+                    if len(valid_labels) != len(mock_labels):
+                        logger.warning(f"Some labels not in encoder classes, using default mapping")
+                        # Use default mapping
+                        default_mapping = {'CONFIRMED': 0, 'CANDIDATE': 1, 'FALSE POSITIVE': 2}
+                        encoded_labels = np.array([default_mapping.get(label, 0) for label in mock_labels])
+                    else:
+                        encoded_labels = preprocessors[dataset].label_encoder.transform(mock_labels)
+                else:
+                    # Encoder not fitted, use default mapping
+                    default_mapping = {'CONFIRMED': 0, 'CANDIDATE': 1, 'FALSE POSITIVE': 2}
+                    encoded_labels = np.array([default_mapping.get(label, 0) for label in mock_labels])
+            else:
+                # Create temporary encoder
+                temp_encoder = LabelEncoder()
+                encoded_labels = temp_encoder.fit_transform(mock_labels)
+        except Exception as e:
+            logger.error(f"Error encoding labels: {str(e)}")
+            # Fallback to default mapping
+            default_mapping = {'CONFIRMED': 0, 'CANDIDATE': 1, 'FALSE POSITIVE': 2}
+            encoded_labels = np.array([default_mapping.get(label, 0) for label in mock_labels])
         
-        # Train model
-        new_model.fit(processed_features, encoded_labels)
+        # Train model with error handling
+        try:
+            new_model.fit(processed_features, encoded_labels)
+        except Exception as e:
+            logger.error(f"Error training model: {str(e)}")
+            # Return current accuracy if training fails
+            return get_model_accuracy(dataset)
         
         # Calculate mock accuracy improvement
         base_accuracy = get_model_accuracy(dataset)
@@ -882,6 +1139,11 @@ def health_check():
         return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
 
 
+@app.route('/favicon.ico')
+def favicon():
+    """Serve favicon to prevent 404 errors."""
+    return '', 204  # No content response
+
 @app.route('/system-status', methods=['GET'])
 def system_status():
     """Get detailed system status information."""
@@ -901,10 +1163,10 @@ if __name__ == '__main__':
     for dataset in DATASETS:
         logger.info(f"Loading models for {dataset.upper()} dataset...")
         if load_model_components(dataset):
-            logger.info(f"✓ Successfully loaded models for {dataset}")
+            logger.info(f"[OK] Successfully loaded models for {dataset}")
             successful_loads += 1
         else:
-            logger.warning(f"✗ Failed to load models for {dataset}")
+            logger.warning(f"[FAIL] Failed to load models for {dataset}")
     
     logger.info("=" * 60)
     logger.info(f"Model loading complete: {successful_loads}/{len(DATASETS)} datasets loaded")

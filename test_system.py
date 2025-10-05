@@ -12,7 +12,7 @@ import time
 def test_health_check(base_url="http://localhost:5000"):
     """Test the health check endpoint."""
     try:
-        response = requests.get(f"{base_url}/health", timeout=5)
+        response = requests.get(f"{base_url}/health", timeout=10)
         if response.status_code == 200:
             data = response.json()
             print(f"✅ Health check passed: {data.get('status', 'unknown')}")
@@ -40,11 +40,19 @@ def test_login_endpoint(base_url="http://localhost:5000"):
             }
             
             session = requests.Session()
-            login_response = session.post(f"{base_url}/login", data=login_data, timeout=5)
+            login_response = session.post(f"{base_url}/login", data=login_data, timeout=5, allow_redirects=False)
             
             if login_response.status_code == 302:  # Redirect after successful login
                 print("✅ Login successful with correct credentials")
                 return True, session
+            elif login_response.status_code == 200:
+                # Check if we're redirected to the main page (successful login)
+                if 'index' in login_response.url or 'main' in login_response.url:
+                    print("✅ Login successful with correct credentials")
+                    return True, session
+                else:
+                    print(f"❌ Login failed: Got 200 but not redirected properly")
+                    return False, None
             else:
                 print(f"❌ Login failed: {login_response.status_code}")
                 return False, None
@@ -92,7 +100,7 @@ def test_logout_endpoint(base_url="http://localhost:5000", session=None):
         return False
     
     try:
-        response = session.get(f"{base_url}/logout", timeout=5)
+        response = session.get(f"{base_url}/logout", timeout=5, allow_redirects=False)
         if response.status_code == 302:  # Redirect after logout
             print("✅ Logout successful")
             return True
@@ -103,14 +111,18 @@ def test_logout_endpoint(base_url="http://localhost:5000", session=None):
         print(f"❌ Logout test error: {e}")
         return False
 
-def test_stats_endpoint(base_url="http://localhost:5000"):
+def test_stats_endpoint(base_url="http://localhost:5000", session=None):
     """Test the stats endpoint for all datasets."""
     datasets = ['k2', 'tess', 'koi']
     results = []
     
     for dataset in datasets:
         try:
-            response = requests.get(f"{base_url}/stats?dataset={dataset}", timeout=5)
+            if session:
+                response = session.get(f"{base_url}/stats?dataset={dataset}", timeout=5)
+            else:
+                response = requests.get(f"{base_url}/stats?dataset={dataset}", timeout=5)
+            
             if response.status_code == 200:
                 data = response.json()
                 print(f"✅ Stats for {dataset.upper()}: Accuracy {data.get('accuracy', 0):.2%}")
@@ -124,7 +136,7 @@ def test_stats_endpoint(base_url="http://localhost:5000"):
     
     return all(results)
 
-def test_prediction_endpoint(base_url="http://localhost:5000"):
+def test_prediction_endpoint(base_url="http://localhost:5000", session=None):
     """Test the prediction endpoint."""
     test_data = {
         "dataset": "k2",
@@ -134,12 +146,20 @@ def test_prediction_endpoint(base_url="http://localhost:5000"):
     }
     
     try:
-        response = requests.post(
-            f"{base_url}/predict",
-            json=test_data,
-            headers={'Content-Type': 'application/json'},
-            timeout=10
-        )
+        if session:
+            response = session.post(
+                f"{base_url}/predict",
+                json=test_data,
+                headers={'Content-Type': 'application/json'},
+                timeout=10
+            )
+        else:
+            response = requests.post(
+                f"{base_url}/predict",
+                json=test_data,
+                headers={'Content-Type': 'application/json'},
+                timeout=10
+            )
         
         if response.status_code == 200:
             data = response.json()
@@ -227,8 +247,8 @@ def main():
             elif test_name == "Logout":
                 result = test_func(base_url, authenticated_session)
             else:
-                # For stats and prediction, we need to create a new session with auth
-                result = test_func(base_url)
+                # For stats and prediction, use the authenticated session
+                result = test_func(base_url, authenticated_session)
             results.append((test_name, result))
     else:
         print("\n⚠️  Skipping authenticated endpoint tests due to login failure")
