@@ -14,11 +14,17 @@
   <img src="https://img.shields.io/badge/Data%20Source-NASA%20Exoplanet%20Archive-FF6F00?style=for-the-badge&logo=nasa&logoColor=white">
 </p>
 
+<div align="center">
+
+![NASA Banner](https://via.placeholder.com/1200x400/0B3D91/FFFFFF?text=🚀+A+World+Away+AI-Powered+Exoplanet+Hunter+🌌)
+
+</div>
+
 ---
 
 ## 🌌 The Cosmic Gateway  
 
-> *“Exploring the cosmos through technology — making space data accessible for everyone.”*  
+> *"Exploring the cosmos through technology — making space data accessible for everyone."*  
 > — **NASA Space Apps Challenge 2025 Theme**  
 
 **A World Away** is an advanced machine learning application developed by **Team syntax_in_orbit** during the **NASA Space Apps Challenge 2025**.  
@@ -53,7 +59,7 @@ We transform raw light curve data into actionable intelligence, making the searc
 
 ## 🎨 Design System: The Cosmic Palette  
 
-Our design system follows NASA’s color guidelines, giving a true **Mission Control** look.  
+Our design system follows NASA's color guidelines, giving a true **Mission Control** look.  
 
 | Color Name | Hex Code | Purpose |
 | :--- | :--- | :--- |
