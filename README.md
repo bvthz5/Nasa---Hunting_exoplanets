@@ -1,4 +1,4 @@
-<div align="center">
+<div align="center" style="background: linear-gradient(135deg, #0B3D91 0%, #1a1a2e 50%, #16213e 100%); padding: 2rem; border-radius: 15px; color: white;">
 
 # 🛰️ A World Away  
 ### AI-Powered Exoplanet Discovery Platform
@@ -6,45 +6,32 @@
 ![NASA](https://img.shields.io/badge/NASA-Space%20Apps%202025-0B3D91?style=for-the-badge&logo=nasa&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/Flask-2.0-000000?style=for-the-badge&logo=flask&logoColor=white)
-![Machine Learning](https://img.shields.io/badge/ML-XGBoost-FF6F00?style=for-the-badge&logo=scikit-learn&logoColor=white)
+![Accuracy](https://img.shields.io/badge/Accuracy-92.3%25-FC3D21?style=for-the-badge&logo=scikit-learn&logoColor=white)
 
-*Classifying exoplanets with 92% accuracy using NASA Kepler data*
-
-</div>
-
----
-
-## 🌟 About The Project
-
-<div align="center">
-
-![Project Showcase](https://via.placeholder.com/800x400/0B3D91/FFFFFF?text=AI+Exoplanet+Classifier+🚀)
+*Classifying exoplanets with machine learning using NASA Kepler mission data*
 
 </div>
 
-**A World Away** is an intelligent system that leverages machine learning to identify and classify potential exoplanets from NASA's Kepler mission data. Our XGBoost model analyzes light curve data to distinguish between confirmed exoplanets, false positives, and candidate planets with exceptional accuracy.
+<br>
 
-### 🎯 Key Features
+<div style="background: #16213e; padding: 2rem; border-radius: 10px; border-left: 4px solid #FC3D21; color: white;">
 
-- 🔭 **Advanced Classification** - 92% accurate exoplanet detection
-- 🎨 **NASA-Inspired UI** - Professional space agency design
-- 📊 **Interactive Analytics** - Real-time data visualization
-- 🌐 **Web Accessible** - WCAG 2.1 compliant interface
-- 🚀 **Easy Deployment** - Ready for cloud or local hosting
+## 🌟 Project Overview
 
----
+**A World Away** is an intelligent system that leverages advanced machine learning to identify and classify potential exoplanets from NASA's Kepler mission data. Our XGBoost model analyzes light curve data to distinguish between confirmed exoplanets, false positives, and candidate planets with exceptional accuracy.
+
+</div>
+
+<br>
 
 ## 🚀 Quick Start
 
-### Prerequisites
+<div style="background: #1a1a2e; padding: 1.5rem; border-radius: 10px; border: 1px solid #0B3D91;">
 
-- Python 3.9 or higher
-- pip package manager
-
-### Installation
+### Installation & Setup
 
 ```bash
-# Clone the repository
+# Clone repository
 git clone https://github.com/yourusername/a-world-away.git
 cd a-world-away
 
